@@ -1,0 +1,721 @@
+#!/usr/bin/perl
+#===============================================================================
+# xymond_systemd - Xymon channel worker for systemd unit monitoring
+#
+# Version:      0.1.0 (SemVer)
+# License:      GPL-2.0
+# Project:      xymon-systemdmon
+#
+# Description:
+#   Server-side worker for the xymond "client" channel. Started by
+#   xymonlaunch via xymond_channel (see server/etc/tasks-snippet.cfg):
+#
+#     xymond_channel --channel=client xymond_systemd
+#
+#   For every incoming client message it extracts the [local:systemd]
+#   section (produced by the client collector client/local/systemd),
+#   evaluates it against the central rule file systemdmon.cfg and
+#   sends a "status" message for the "systemd" column. Hosts whose
+#   client message has no [local:systemd] section are skipped
+#   entirely - no column is created for them.
+#
+#   Only Perl 5 core modules are used - no CPAN dependencies.
+#
+# Program flow:
+#   1. Parse options / environment, load rule file (and hosts.cfg
+#      page map if any rule uses PAGE= scoping).
+#   2. Read messages from stdin using the xymond_channel framing:
+#      header "@@client#SEQ/HOST|ts|sender|hostname|clientos|class|
+#      collectorid", body = full client message, terminated by a
+#      line containing only "@@". (Verified against Xymon 4.3.30
+#      sources: xymond.c posttochannel/handle_client,
+#      xymond_worker.c, xymond_sample.c.)
+#   3. Handle control messages: @@shutdown (exit), @@logrotate
+#      (reopen logfile from $XYMONCHANNEL_LOGFILENAME), @@idle
+#      (ignore), @@reload (re-read hosts.cfg page map).
+#   4. For @@client messages: extract [local:systemd], parse the
+#      versioned collector format, evaluate rules, send status via
+#      the xymon(1) CLI ("xymon $XYMSRV @" with the message on stdin).
+#   5. On SIGHUP or when the rule file mtime changes, reload the
+#      rule file without a restart.
+#
+# Options:
+#   --config=FILE    rule file (default: $XYMONHOME/etc/systemdmon.cfg)
+#   --column=NAME    status column name (default: systemd)
+#   --lifetime=SPEC  status lifetime, xymon syntax: number = minutes,
+#                    or suffix h/d/w (default: 10). Choose slightly
+#                    above the client poll interval.
+#   --test           offline mode: treat remaining arguments as files
+#                    containing a client-channel stream; print status
+#                    messages to stdout instead of sending them.
+#   --dump-rules     parse the rule file, print the result, exit.
+#   --debug          verbose logging to stderr.
+#   --help, --version
+#
+# Parameters (environment variable overrides, options win):
+#   SYSTEMDMON_CFG        rule file path
+#   SYSTEMDMON_COLUMN     column name
+#   SYSTEMDMON_LIFETIME   status lifetime
+#   SYSTEMDMON_HOSTSCFG   hosts.cfg path for PAGE= scoping
+#                         (default: $HOSTSCFG or $XYMONHOME/etc/hosts.cfg)
+#   XYMON, XYMSRV         xymon CLI binary and target server, provided
+#                         by the xymonserver.cfg environment.
+#
+# Rule file syntax: see server/etc/systemdmon.cfg.
+#===============================================================================
+
+use strict;
+use warnings;
+use Getopt::Long qw(:config no_ignore_case);
+use POSIX qw(strftime);
+use File::Basename qw(dirname);
+
+my $VERSION = '0.1.0';
+my $FORMAT_VERSION = 1;         # supported collector format version
+
+#--- configuration / options --------------------------------------------------
+
+my $cfgfile  = $ENV{SYSTEMDMON_CFG}
+    || (defined $ENV{XYMONHOME} ? "$ENV{XYMONHOME}/etc/systemdmon.cfg"
+                                : "/etc/xymon/systemdmon.cfg");
+my $column   = $ENV{SYSTEMDMON_COLUMN}   || 'systemd';
+my $lifetime = $ENV{SYSTEMDMON_LIFETIME} || '10';
+my ($testmode, $dumprules, $debug, $help, $version) = (0, 0, 0, 0, 0);
+
+GetOptions(
+    'config=s'   => \$cfgfile,
+    'column=s'   => \$column,
+    'lifetime=s' => \$lifetime,
+    'test'       => \$testmode,
+    'dump-rules' => \$dumprules,
+    'debug'      => \$debug,
+    'help|h'     => \$help,
+    'version'    => \$version,
+) or usage(1);
+
+usage(0) if $help;
+if ($version) { print "xymond_systemd $VERSION\n"; exit 0; }
+if ($lifetime !~ /^\d+[hdw]?$/) {
+    logmsg("invalid --lifetime '$lifetime', falling back to 10");
+    $lifetime = '10';
+}
+
+my %COLORRANK = (clear => 0, green => 1, yellow => 2, red => 3);
+
+my $config;          # parsed rule file
+my $cfg_mtime = 0;
+my $hostpages;       # href: lc(hostname) => "page/subpage" path
+my $reload_flag = 0;
+my $running = 1;
+
+$SIG{HUP} = sub { $reload_flag = 1 };
+
+load_config();
+load_hostpages();
+
+if ($dumprules) { dump_rules(); exit 0; }
+
+logmsg("xymond_systemd $VERSION starting (config=$cfgfile column=$column lifetime=$lifetime)");
+
+if ($testmode) {
+    usage(1) unless @ARGV;
+    for my $file (@ARGV) {
+        open(my $fh, '<', $file) or do {
+            logmsg("cannot open test file $file: $!");
+            next;
+        };
+        process_stream($fh);
+        close($fh);
+    }
+}
+else {
+    process_stream(\*STDIN);
+}
+
+logmsg("xymond_systemd shutting down");
+exit 0;
+
+#--- main loop ----------------------------------------------------------------
+
+sub process_stream {
+    my ($fh) = @_;
+
+    # Messages are separated by a line containing only "@@"
+    # (i.e. the byte sequence "\n@@\n" - same assumption as the C
+    # worker library xymond_worker.c makes).
+    local $/ = "\n\@\@\n";
+
+    while ($running && defined(my $chunk = <$fh>)) {
+        $chunk =~ s/\n\@\@\n\z//;
+
+        maybe_reload();
+
+        next unless $chunk =~ /^\@\@/;
+        my ($hdr, $body) = split(/\n/, $chunk, 2);
+        $body = '' unless defined $body;
+        my @meta = split(/\|/, $hdr);
+        my $marker = $meta[0];
+
+        if ($marker =~ /^\@\@shutdown/) {
+            logmsg("received @\@shutdown");
+            $running = 0;
+        }
+        elsif ($marker =~ /^\@\@logrotate/) {
+            my $fn = $ENV{XYMONCHANNEL_LOGFILENAME};
+            if (defined $fn && length $fn) {
+                open(STDOUT, '>>', $fn) or logmsg("cannot reopen stdout to $fn: $!");
+                open(STDERR, '>>', $fn) or print "cannot reopen stderr to $fn: $!\n";
+            }
+        }
+        elsif ($marker =~ /^\@\@reload/) {
+            # hosts.cfg changed
+            load_hostpages();
+        }
+        elsif ($marker =~ /^\@\@idle/) {
+            # nothing to do
+        }
+        elsif ($marker =~ /^\@\@client(?:[#:])/) {
+            # @@client#SEQ/HOST|timestamp|sender|hostname|clientos|class|collectorid
+            my $hostname = $meta[3];
+            my $clientos = defined $meta[4] ? $meta[4] : '';
+            my $class    = defined $meta[5] ? $meta[5] : '';
+            unless (defined $hostname && length $hostname) {
+                logmsg("client message without hostname in header, skipped");
+                next;
+            }
+            $class = $clientos unless length $class;
+            handle_client($hostname, $class, $body);
+        }
+        # other markers (drophost, droptest, renamehost, ...) are
+        # irrelevant here: we keep no per-host state.
+    }
+}
+
+sub maybe_reload {
+    my @st = stat($cfgfile);
+    my $mtime = @st ? $st[9] : 0;
+    if ($reload_flag || ($mtime && $cfg_mtime && $mtime != $cfg_mtime)) {
+        logmsg("reloading configuration" . ($reload_flag ? " (SIGHUP)" : " (mtime changed)"));
+        $reload_flag = 0;
+        load_config();
+        load_hostpages();
+    }
+}
+
+#--- client message handling --------------------------------------------------
+
+sub handle_client {
+    my ($hostname, $class, $body) = @_;
+
+    my $section = extract_section($body, 'systemd');
+    unless (defined $section) {
+        # Host does not run the collector: no column at all.
+        dbg("$hostname: no [local:systemd] section, skipped");
+        return;
+    }
+
+    my $data = parse_collector($section);
+    unless (defined $data->{version}) {
+        logmsg("$hostname: [local:systemd] section without version marker, skipped");
+        return;
+    }
+    if ($data->{version} != $FORMAT_VERSION) {
+        logmsg("$hostname: collector format v$data->{version} (worker supports v$FORMAT_VERSION), trying anyway");
+    }
+
+    my $page = $hostpages->{lc $hostname};
+    $page = '' unless defined $page;
+
+    my ($color, $message) = evaluate_host($hostname, $class, $page, $data);
+    send_status($hostname, $color, $message);
+}
+
+# Extract one [local:NAME] section from a full client message.
+sub extract_section {
+    my ($body, $name) = @_;
+    if ($body =~ /^\[local:\Q$name\E\]\r?\n(.*?)(?=^\[|\z)/ms) {
+        return $1;
+    }
+    return undef;
+}
+
+# Parse the versioned collector output.
+sub parse_collector {
+    my ($text) = @_;
+    my %data = (version => undef, systemstate => undef,
+                units => {}, order => [], failed => {});
+    my $sub = '';
+
+    for my $line (split /\n/, $text) {
+        $line =~ s/\r$//;
+        next if $line =~ /^\s*$/;
+
+        if ($line =~ /^systemdmon\s+v(\d+)\b/) { $data{version} = $1; next; }
+        if ($line =~ /^##\s*(\S+)/)            { $sub = lc $1;       next; }
+
+        if ($sub eq 'systemstate') {
+            $data{systemstate} = trim($line) unless defined $data{systemstate};
+        }
+        elsif ($sub eq 'units' || $sub eq 'failed') {
+            my @f = split(/\s+/, trim($line), 6);
+            # systemctl may prefix a state marker character (e.g. "*")
+            # before the unit name; unit names always contain a dot.
+            shift @f if @f && $f[0] !~ /\./;
+            next unless @f >= 4;
+            my ($unit, $load, $active, $substate, $desc) = @f;
+            $desc = '' unless defined $desc;
+            my $rec = { load => $load, active => $active,
+                        sub => $substate, desc => $desc };
+            if ($sub eq 'units') {
+                push @{$data{order}}, $unit unless exists $data{units}{$unit};
+                $data{units}{$unit} = $rec;
+            }
+            else {
+                $data{failed}{$unit} = $rec;
+            }
+        }
+        # unknown subsection: ignore (forward compatibility)
+    }
+    return \%data;
+}
+
+#--- rule evaluation ----------------------------------------------------------
+
+sub evaluate_host {
+    my ($hostname, $class, $page, $data) = @_;
+
+    # Sections that apply to this host, in ascending specificity
+    # (global=0, PAGE=1, CLASS=2, HOST=3); config order breaks ties.
+    my @applicable = grep { section_applies($_, $hostname, $class, $page) }
+                          @{$config->{sections}};
+
+    # Effective scalar settings: the most specific section wins,
+    # among equals the later one in the file.
+    my ($defaultfailed, $systemstate_color) = ('yellow', 'yellow');
+    for my $sec (sort { $a->{spec} <=> $b->{spec} || $a->{idx} <=> $b->{idx} } @applicable) {
+        $defaultfailed     = $sec->{defaultfailed} if defined $sec->{defaultfailed};
+        $systemstate_color = $sec->{systemstate}   if defined $sec->{systemstate};
+    }
+    my @ignore = map { @{$_->{ignore}} } @applicable;
+
+    # Rules: most specific first; within the same specificity keep
+    # file order. The first rule that matches a unit claims it.
+    my @rules = map  { @{$_->{rules}} }
+                sort { $b->{spec} <=> $a->{spec} || $a->{idx} <=> $b->{idx} }
+                @applicable;
+
+    my %claimed;
+    my @results;    # { color => ..., text => ... }
+
+    for my $rule (@rules) {
+        my @all_matched = grep { match_matcher($rule->{pattern}, $_, 0) }
+                               @{$data->{order}};
+        my @matched = grep { !$claimed{$_} } @all_matched;
+
+        # All units this pattern matches were claimed by more specific
+        # rules: this rule is overridden, stay silent.
+        next if @all_matched && !@matched;
+
+        $claimed{$_} = 1 for @matched;
+
+        my $label = defined $rule->{text} ? $rule->{text} : $rule->{pattern}{raw};
+
+        if (defined $rule->{min} || defined $rule->{max}) {
+            # count check, PROC-style
+            my $ok = grep { unit_in_state($data->{units}{$_}, $rule->{state}) } @matched;
+            my $min = defined $rule->{min} ? $rule->{min} : 1;
+            my $max = $rule->{max};
+            my $bad = ($ok < $min) || (defined $max && $ok > $max);
+            my $range = "min=$min" . (defined $max ? " max=$max" : "");
+            push @results, {
+                color => $bad ? $rule->{color} : 'green',
+                text  => sprintf("%s - %d unit(s) %s (%s)",
+                                 $label, $ok, $rule->{state}, $range),
+            };
+        }
+        elsif (!@matched) {
+            # unit expected but not reported at all
+            push @results, {
+                color => $rule->{color},
+                text  => sprintf("%s - no matching unit reported - expected %s",
+                                 $label, $rule->{state}),
+            };
+        }
+        else {
+            for my $unit (@matched) {
+                my $u  = $data->{units}{$unit};
+                my $ok = unit_in_state($u, $rule->{state});
+                push @results, {
+                    color => $ok ? 'green' : $rule->{color},
+                    text  => sprintf("%s - %s (%s)%s", $unit, $u->{active}, $u->{sub},
+                                     $ok ? "" : " - expected $rule->{state}"),
+                };
+            }
+        }
+    }
+
+    # Failed units not claimed by any rule: DEFAULTFAILED handling.
+    # Sources: the explicit failed list (all types) plus units with
+    # ACTIVE=failed from the units list.
+    if ($defaultfailed ne 'ignore') {
+        my %seen;
+        my @failed = grep { !$seen{$_}++ }
+                     (sort(keys %{$data->{failed}}),
+                      grep { $data->{units}{$_}{active} eq 'failed' } @{$data->{order}});
+        for my $unit (@failed) {
+            next if $claimed{$unit};
+            next if grep { match_matcher($_, $unit, 0) } @ignore;
+            push @results, {
+                color => $defaultfailed,
+                text  => "$unit - failed (no explicit rule, DEFAULTFAILED)",
+            };
+        }
+    }
+
+    # Overall system state
+    if (defined $data->{systemstate} && $systemstate_color ne 'ignore') {
+        my $ss = $data->{systemstate};
+        push @results, {
+            color => ($ss eq 'running') ? 'green' : $systemstate_color,
+            text  => "system state: $ss",
+        };
+    }
+
+    # Worst color wins; an empty result list is green.
+    my $color = 'green';
+    for my $r (@results) {
+        $color = $r->{color} if $COLORRANK{$r->{color}} > $COLORRANK{$color};
+    }
+
+    my $nunits = scalar @{$data->{order}};
+    my $summary = ($color eq 'green') ? 'systemd units OK' : 'systemd unit problem';
+    my $body = join("\n", map { "&$_->{color} $_->{text}" } @results);
+    $body = "no checks configured for this host" unless length $body;
+
+    my $message = sprintf("%s - %s\n\n%s\n\n%d units reported by client, collector format v%s\nxymond_systemd %s\n",
+                          scalar(localtime), $summary, $body,
+                          $nunits, (defined $data->{version} ? $data->{version} : '?'),
+                          $VERSION);
+    return ($color, $message);
+}
+
+sub unit_in_state {
+    my ($u, $state) = @_;
+    return 0 unless defined $u;
+    my ($want_active, $want_sub) = split(m{/}, $state, 2);
+    return 0 unless $u->{active} eq $want_active;
+    return 0 if defined $want_sub && $u->{sub} ne $want_sub;
+    return 1;
+}
+
+sub section_applies {
+    my ($sec, $hostname, $class, $page) = @_;
+    if ($sec->{sel}{HOST}) {
+        return 0 unless grep { match_matcher($_, $hostname, 1) } @{$sec->{sel}{HOST}};
+    }
+    if ($sec->{sel}{CLASS}) {
+        return 0 unless grep { match_matcher($_, $class, 1) } @{$sec->{sel}{CLASS}};
+    }
+    if ($sec->{sel}{PAGE}) {
+        # match against the full page path and each path element
+        my @cand = ($page, split(m{/}, $page));
+        return 0 unless grep { my $m = $_; grep { match_matcher($m, $_, 1) } @cand }
+                             @{$sec->{sel}{PAGE}};
+    }
+    return 1;
+}
+
+#--- pattern helpers ----------------------------------------------------------
+
+# A matcher is either an exact string or a %-prefixed PCRE.
+sub make_matcher {
+    my ($raw) = @_;
+    if ($raw =~ /^%(.+)$/s) {
+        my $re = eval { qr/$1/ };
+        if ($@) {
+            logmsg("invalid pattern '$raw' ignored: $@");
+            return undef;
+        }
+        return { re => $re, raw => $raw };
+    }
+    return { str => $raw, raw => $raw };
+}
+
+sub match_matcher {
+    my ($m, $value, $ci) = @_;
+    return 0 unless defined $m && defined $value;
+    if ($m->{re}) {
+        return $value =~ $m->{re} ? 1 : 0;
+    }
+    return $ci ? (lc($m->{str}) eq lc($value)) : ($m->{str} eq $value);
+}
+
+#--- rule file parsing --------------------------------------------------------
+
+sub new_section {
+    my ($idx) = @_;
+    return { sel => {}, spec => 0, idx => $idx,
+             rules => [], ignore => [],
+             defaultfailed => undef, systemstate => undef };
+}
+
+sub load_config {
+    my %cfg = (sections => []);
+    my $idx = 0;
+    my $cur = new_section($idx++);
+    push @{$cfg{sections}}, $cur;
+
+    my $fh;
+    unless (open($fh, '<', $cfgfile)) {
+        logmsg("cannot read rule file $cfgfile: $! - using built-in defaults (DEFAULTFAILED yellow)");
+        $config = \%cfg;
+        $cfg_mtime = 0;
+        return;
+    }
+
+    while (my $line = <$fh>) {
+        chomp $line;
+        $line =~ s/\r$//;
+        $line = trim($line);
+        next if $line eq '' || $line =~ /^#/;
+
+        if ($line =~ /^(?:HOST|CLASS|PAGE)=/i) {
+            $cur = new_section($idx++);
+            my $ok = 1;
+            for my $tok (split /\s+/, $line) {
+                if ($tok =~ /^(HOST|CLASS|PAGE)=(.+)$/i) {
+                    my ($key, $vals) = (uc $1, $2);
+                    push @{$cur->{sel}{$key}},
+                         grep { defined } map { make_matcher($_) } split(/,/, $vals);
+                }
+                else {
+                    logmsg("$cfgfile line $.: unknown selector token '$tok'");
+                    $ok = 0;
+                }
+            }
+            $cur->{spec} = $cur->{sel}{HOST} ? 3 : $cur->{sel}{CLASS} ? 2 : 1;
+            push @{$cfg{sections}}, $cur if $ok;
+        }
+        elsif ($line =~ /^SVC\s+(.+)$/i) {
+            my $rule = parse_svc_rule($1, $.);
+            push @{$cur->{rules}}, { %$rule, spec => $cur->{spec}, idx => $cur->{idx} }
+                if $rule;
+        }
+        elsif ($line =~ /^DEFAULTFAILED\s+(\S+)\s*$/i) {
+            my $c = lc $1;
+            if ($c =~ /^(?:red|yellow|clear|ignore)$/) { $cur->{defaultfailed} = $c; }
+            else { logmsg("$cfgfile line $.: invalid DEFAULTFAILED color '$1'"); }
+        }
+        elsif ($line =~ /^SYSTEMSTATE\s+(\S+)\s*$/i) {
+            my $c = lc $1;
+            if ($c =~ /^(?:red|yellow|clear|ignore)$/) { $cur->{systemstate} = $c; }
+            else { logmsg("$cfgfile line $.: invalid SYSTEMSTATE color '$1'"); }
+        }
+        elsif ($line =~ /^IGNORE\s+(\S+)\s*$/i) {
+            my $m = make_matcher($1);
+            push @{$cur->{ignore}}, $m if $m;
+        }
+        else {
+            logmsg("$cfgfile line $.: unknown directive '$line' ignored");
+        }
+    }
+    close($fh);
+
+    my @st = stat($cfgfile);
+    $cfg_mtime = @st ? $st[9] : 0;
+    $config = \%cfg;
+
+    my $nrules = 0;
+    $nrules += scalar @{$_->{rules}} for @{$cfg{sections}};
+    logmsg(sprintf("loaded %s: %d section(s), %d SVC rule(s)",
+                   $cfgfile, scalar @{$cfg{sections}}, $nrules));
+}
+
+# SVC <pattern> [state] [color] [MIN=n] [MAX=n] [TEXT=name]
+sub parse_svc_rule {
+    my ($rest, $lineno) = @_;
+    my %rule = (state => 'active', color => 'red',
+                min => undef, max => undef, text => undef);
+
+    if    ($rest =~ s/\s*TEXT="([^"]*)"//)  { $rule{text} = $1; }
+    elsif ($rest =~ s/\s*TEXT=(\S+)//)      { $rule{text} = $1; }
+    if    ($rest =~ s/\s*MIN=(\d+)//)       { $rule{min}  = $1; }
+    if    ($rest =~ s/\s*MAX=(\d+)//)       { $rule{max}  = $1; }
+
+    my @tok = split(/\s+/, trim($rest));
+    unless (@tok) {
+        logmsg("$cfgfile line $lineno: SVC rule without unit pattern ignored");
+        return undef;
+    }
+    my $pattern = make_matcher(shift @tok);
+    return undef unless $pattern;
+    $rule{pattern} = $pattern;
+
+    if (@tok) {
+        my $state = lc shift @tok;
+        if ($state =~ m{^(?:active|inactive|failed|activating|deactivating|reloading|maintenance)(?:/[a-z-]+)?$}) {
+            $rule{state} = $state;
+        }
+        else {
+            logmsg("$cfgfile line $lineno: invalid state '$state', using 'active'");
+        }
+    }
+    if (@tok) {
+        my $color = lc shift @tok;
+        if ($color =~ /^(?:red|yellow|clear)$/) { $rule{color} = $color; }
+        else { logmsg("$cfgfile line $lineno: invalid color '$color', using 'red'"); }
+    }
+    if (@tok) {
+        logmsg("$cfgfile line $lineno: trailing junk '@tok' in SVC rule ignored");
+    }
+    return \%rule;
+}
+
+sub dump_rules {
+    print "config: $cfgfile\n";
+    for my $sec (@{$config->{sections}}) {
+        my @sel;
+        for my $key (qw(HOST CLASS PAGE)) {
+            push @sel, "$key=" . join(',', map { $_->{raw} } @{$sec->{sel}{$key}})
+                if $sec->{sel}{$key};
+        }
+        printf "section #%d spec=%d %s\n", $sec->{idx}, $sec->{spec},
+               (@sel ? join(' ', @sel) : '(global)');
+        printf "  DEFAULTFAILED %s\n", $sec->{defaultfailed} if defined $sec->{defaultfailed};
+        printf "  SYSTEMSTATE %s\n",   $sec->{systemstate}   if defined $sec->{systemstate};
+        printf "  IGNORE %s\n", $_->{raw} for @{$sec->{ignore}};
+        for my $r (@{$sec->{rules}}) {
+            printf "  SVC %s state=%s color=%s%s%s%s\n",
+                   $r->{pattern}{raw}, $r->{state}, $r->{color},
+                   (defined $r->{min}  ? " min=$r->{min}"    : ''),
+                   (defined $r->{max}  ? " max=$r->{max}"    : ''),
+                   (defined $r->{text} ? " text=$r->{text}"  : '');
+        }
+    }
+}
+
+#--- hosts.cfg page map (for PAGE= scoping) -----------------------------------
+
+sub load_hostpages {
+    my %pages;
+    my $file = $ENV{SYSTEMDMON_HOSTSCFG} || $ENV{HOSTSCFG}
+        || (defined $ENV{XYMONHOME} ? "$ENV{XYMONHOME}/etc/hosts.cfg" : undef);
+    if (defined $file && -r $file) {
+        parse_hosts_file($file, \%pages, '', 0);
+        dbg(sprintf("hosts.cfg page map: %d host(s) from %s", scalar keys %pages, $file));
+    }
+    $hostpages = \%pages;
+}
+
+# Best-effort parser: tracks "page"/"subpage"/"subparent" and maps each
+# host line to its page path. "include" is followed; "directory" is not.
+sub parse_hosts_file {
+    my ($file, $pages, $curpath, $depth) = @_;
+    return if $depth > 5;
+    open(my $fh, '<', $file) or do {
+        logmsg("cannot read hosts.cfg $file: $!");
+        return;
+    };
+    my $curtop = $curpath;
+    while (my $line = <$fh>) {
+        chomp $line;
+        $line = trim($line);
+        next if $line eq '' || $line =~ /^#/;
+
+        if ($line =~ /^page\s+(\S+)/i) {
+            $curtop = $1; $curpath = $1;
+        }
+        elsif ($line =~ /^subpage\s+(\S+)/i) {
+            $curpath = "$curtop/$1";
+        }
+        elsif ($line =~ /^subparent\s+(\S+)\s+(\S+)/i) {
+            $curpath = "$1/$2";
+        }
+        elsif ($line =~ /^(?:include|dispinclude|netinclude)\s+(\S+)/i) {
+            my $inc = $1;
+            $inc = dirname($file) . "/$inc" unless $inc =~ m{^/};
+            parse_hosts_file($inc, $pages, $curpath, $depth + 1);
+        }
+        elsif ($line =~ /^(?:directory|group\S*|title|ospage|vpage|vsubpage|vsubparent)\b/i) {
+            # not needed for the page map
+        }
+        elsif ($line =~ /^(\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]*:[0-9a-fA-F:.]+)\s+(\S+)/) {
+            my $host = lc $2;
+            $pages->{$host} = $curpath unless exists $pages->{$host};
+        }
+    }
+    close($fh);
+}
+
+#--- status transmission ------------------------------------------------------
+
+sub send_status {
+    my ($hostname, $color, $message) = @_;
+
+    (my $xyhost = $hostname) =~ s/\./,/g;
+    my $status = "status+$lifetime $xyhost.$column $color $message";
+
+    if ($testmode) {
+        print "### BEGIN STATUS host=$hostname color=$color\n";
+        print $status, "\n";
+        print "### END STATUS\n";
+        return;
+    }
+
+    my $xymonbin = $ENV{XYMON}
+        || (defined $ENV{XYMONHOME} ? "$ENV{XYMONHOME}/bin/xymon" : 'xymon');
+    my $xymsrv = $ENV{XYMSRV} || '127.0.0.1';
+
+    # "xymon RECIPIENT @" reads the whole message from stdin
+    # (verified in common/xymon.c of 4.3.30).
+    my $pid = open(my $ph, '|-', $xymonbin, $xymsrv, '@');
+    unless ($pid) {
+        logmsg("cannot run $xymonbin: $!");
+        return;
+    }
+    print $ph $status;
+    close($ph) or logmsg("$xymonbin exited with status " . ($? >> 8));
+    dbg("$hostname: sent $color status");
+}
+
+#--- utilities ----------------------------------------------------------------
+
+sub trim {
+    my ($s) = @_;
+    $s =~ s/^\s+|\s+$//g;
+    return $s;
+}
+
+sub logmsg {
+    my ($msg) = @_;
+    printf STDERR "%s xymond_systemd[%d]: %s\n",
+           strftime("%Y-%m-%d %H:%M:%S", localtime), $$, $msg;
+}
+
+sub dbg {
+    logmsg("DEBUG: " . $_[0]) if $debug;
+}
+
+sub usage {
+    my ($rc) = @_;
+    print STDERR <<"EOF";
+Usage: xymond_systemd [options]              (channel worker mode)
+       xymond_systemd --test FILE...         (offline test mode)
+
+Xymon channel worker for systemd unit monitoring (xymon-systemdmon).
+Attach to the client channel via:
+  xymond_channel --channel=client xymond_systemd [options]
+
+Options:
+  --config=FILE    rule file (default: \$XYMONHOME/etc/systemdmon.cfg)
+  --column=NAME    status column name (default: systemd)
+  --lifetime=SPEC  status lifetime (default: 10 = 10 minutes)
+  --test           read client-channel stream from FILEs, print
+                   status messages to stdout instead of sending
+  --dump-rules     parse and print the rule file, then exit
+  --debug          verbose logging
+  --help           this text
+  --version        print version
+EOF
+    exit $rc;
+}
