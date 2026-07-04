@@ -1,0 +1,57 @@
+@@client#1/web1.example.com|1751600000.123456|10.0.0.1|web1.example.com|linux|linux|
+client web1,example,com.linux linux
+[date]
+Fri Jul  4 10:00:00 CEST 2026
+[local:systemd]
+systemdmon v1
+## systemstate
+running
+## units
+sshd.service loaded active running OpenSSH server daemon
+nginx.service loaded active running A high performance web server
+cron.service loaded inactive dead Regular background program processing daemon
+getty@tty1.service loaded active running Getty on tty1
+backup.timer loaded active waiting Daily backup timer
+tmp.mount loaded active mounted Temporary Directory /tmp
+user@1000.service loaded failed failed User Manager for UID 1000
+## failed
+user@1000.service loaded failed failed User Manager for UID 1000
+[uptime]
+ 10:00:00 up 42 days
+@@
+@@idle
+@@
+@@client#2/db1.example.com|1751600010.223456|10.0.0.2|db1.example.com|linux|linux|
+client db1,example,com.linux linux
+[local:systemd]
+systemdmon v1
+## systemstate
+degraded
+## units
+sshd.service loaded active running OpenSSH server daemon
+cron.service loaded active running Regular background program processing daemon
+getty@tty1.service loaded active running Getty on tty1
+getty@tty2.service loaded active running Getty on tty2
+mysql.service loaded active running MySQL database server
+## failed
+* apt-daily.service loaded failed failed Daily apt download activities
+@@
+@@client#3/ghost.example.com|1751600020.323456|10.0.0.4|ghost.example.com|linux|linux|
+client ghost,example,com.linux linux
+[date]
+Fri Jul  4 10:00:20 CEST 2026
+[uptime]
+ 10:00:20 up 1 day
+@@
+@@client#4/ok1.example.com|1751600030.423456|10.0.0.3|ok1.example.com|linux|linux|
+client ok1,example,com.linux linux
+[local:systemd]
+systemdmon v1
+## systemstate
+running
+## units
+sshd.service loaded active running OpenSSH server daemon
+cron.service loaded active running Regular background program processing daemon
+getty@tty1.service loaded active running Getty on tty1
+## failed
+@@
