@@ -1,0 +1,136 @@
+#!/bin/bash
+#===============================================================================
+# systemd - Xymon client collector for systemd unit states
+#
+# Version:      0.1.0 (SemVer)
+# License:      GPL-2.0
+# Project:      xymon-systemdmon
+#
+# Description:
+#   Xymon client "local" collector. Placed in $XYMONCLIENTHOME/local/,
+#   it is executed by xymonclient.sh on every client run and its stdout
+#   is appended to the client message as section [local:systemd].
+#   It reports the state of ALL systemd units of the configured types,
+#   unfiltered. All filtering/alerting logic lives on the Xymon server
+#   (xymond_systemd worker + systemdmon.cfg).
+#
+# Output format (versioned contract, parsed by xymond_systemd):
+#   systemdmon v1
+#   ## systemstate
+#   <output of systemctl is-system-running>
+#   ## units
+#   <UNIT LOAD ACTIVE SUB DESCRIPTION - one line per unit>
+#   ## failed
+#   <UNIT LOAD ACTIVE SUB DESCRIPTION - failed units, ALL types>
+#   IMPORTANT: no output line may start with "[" - xymond would treat
+#   it as the start of a new client message section.
+#
+# Program flow:
+#   1. Bail out silently (exit 0, no output) if this is not a systemd
+#      system or systemctl is unavailable.
+#   2. Print version marker line.
+#   3. Print "## systemstate" with systemctl is-system-running
+#      (unless disabled).
+#   4. Print "## units" with all units of SYSTEMDMON_TYPES.
+#   5. Print "## failed" with all failed units WITHOUT type filter
+#      (catches failed service runs of timer jobs).
+#
+# Parameters (environment variable overrides):
+#   SYSTEMDMON_TYPES        Comma-separated unit types to report.
+#                           Default: service,timer,socket,mount,automount,swap,path
+#   SYSTEMDMON_SYSTEMSTATE  1 = include "## systemstate" (default), 0 = omit.
+#   SYSTEMDMON_VERBOSE      1 = log progress via logger, 0 = silent (default).
+#   SYSTEMDMON_LOGGER_TAG   Tag for logger. Default: systemdmon
+#
+# Requirements:
+#   Runs as the unprivileged xymon user. Only read-only systemctl
+#   queries against the system bus are used; no D-Bus session is
+#   required.
+#===============================================================================
+
+set -u
+
+SYSTEMDMON_VERSION="0.1.0"
+FORMAT_MARKER="systemdmon v1"
+
+SYSTEMDMON_TYPES="${SYSTEMDMON_TYPES:-service,timer,socket,mount,automount,swap,path}"
+SYSTEMDMON_SYSTEMSTATE="${SYSTEMDMON_SYSTEMSTATE:-1}"
+SYSTEMDMON_VERBOSE="${SYSTEMDMON_VERBOSE:-0}"
+SYSTEMDMON_LOGGER_TAG="${SYSTEMDMON_LOGGER_TAG:-systemdmon}"
+
+# Stable, untranslated systemctl output
+export LC_ALL=C
+
+log() {
+    # Log to syslog/journal; never to stdout (stdout is the payload).
+    if [ "$SYSTEMDMON_VERBOSE" = "1" ]; then
+        logger -t "$SYSTEMDMON_LOGGER_TAG" -- "$*" 2>/dev/null
+    fi
+}
+
+usage() {
+    cat >&2 <<EOF
+Usage: systemd [--help|--version]
+
+Xymon client collector for systemd unit states (xymon-systemdmon).
+Intended to be run by the Xymon client from \$XYMONCLIENTHOME/local/;
+prints the [local:systemd] section payload to stdout.
+
+Environment variable overrides:
+  SYSTEMDMON_TYPES        unit types to report
+                          (default: service,timer,socket,mount,automount,swap,path)
+  SYSTEMDMON_SYSTEMSTATE  1=include is-system-running line (default), 0=omit
+  SYSTEMDMON_VERBOSE      1=log via logger, 0=silent (default)
+  SYSTEMDMON_LOGGER_TAG   logger tag (default: systemdmon)
+EOF
+}
+
+case "${1:-}" in
+    --help|-h)
+        usage
+        exit 0
+        ;;
+    --version)
+        echo "systemd collector (xymon-systemdmon) $SYSTEMDMON_VERSION" >&2
+        exit 0
+        ;;
+    "")
+        :
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
+
+# 1. Not a systemd system, or no systemctl: produce no section content.
+if [ ! -d /run/systemd/system ] || ! command -v systemctl >/dev/null 2>&1; then
+    log "not a systemd system or systemctl missing - no output"
+    exit 0
+fi
+
+log "collecting unit types: $SYSTEMDMON_TYPES"
+
+# 2. Version marker
+echo "$FORMAT_MARKER"
+
+# 3. Overall system state (running/degraded/...). is-system-running
+#    exits non-zero for anything but "running"; the output is what counts.
+if [ "$SYSTEMDMON_SYSTEMSTATE" = "1" ]; then
+    echo "## systemstate"
+    systemctl is-system-running 2>/dev/null
+fi
+
+# 4. All units of the configured types.
+#    --plain: no tree drawing, --full: never ellipsize unit names.
+echo "## units"
+systemctl list-units --type="$SYSTEMDMON_TYPES" --all \
+    --plain --full --no-legend --no-pager 2>/dev/null
+
+# 5. All failed units, deliberately WITHOUT type filter.
+echo "## failed"
+systemctl list-units --state=failed --all \
+    --plain --full --no-legend --no-pager 2>/dev/null
+
+log "collection done"
+exit 0
