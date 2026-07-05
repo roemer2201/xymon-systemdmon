@@ -62,9 +62,15 @@
 - [x] install.sh: detect client vs server installation, place files,
       ENV variable overrides for target paths, --help, dry-run mode
 - [x] Document alerts.cfg examples for the systemd column (README)
+- [x] Packaging: build xymon-systemdmon-client and
+      xymon-systemdmon-server as .deb and .rpm
+      (packaging/build-packages.sh, packaging/xymon-systemdmon.spec;
+      config files marked conffiles / %config(noreplace))
 - [ ] Verify whether Rocky/Terabithia RPM packaging includes a
       tasks.d/ directory from tasks.cfg (Debian/Ubuntu does); update
-      README and tasks-snippet.cfg comments with the result
+      README and tasks-snippet.cfg comments with the result, and set
+      the RPM default paths (xymon_home/xymon_clienthome in the spec)
+      to the verified Terabithia layout
 - [ ] Optional: RRD tracking of unit counts (TRACK-like), graphs.cfg
       example (deliberately deferred, not part of 0.1.0)
 

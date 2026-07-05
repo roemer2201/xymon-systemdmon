@@ -75,9 +75,7 @@ my $FORMAT_VERSION = 1;         # supported collector format version
 
 #--- configuration / options --------------------------------------------------
 
-my $cfgfile  = $ENV{SYSTEMDMON_CFG}
-    || (defined $ENV{XYMONHOME} ? "$ENV{XYMONHOME}/etc/systemdmon.cfg"
-                                : "/etc/xymon/systemdmon.cfg");
+my $cfgfile;
 my $column   = $ENV{SYSTEMDMON_COLUMN}   || 'systemd';
 my $lifetime = $ENV{SYSTEMDMON_LIFETIME} || '10';
 my ($testmode, $dumprules, $debug, $help, $version) = (0, 0, 0, 0, 0);
@@ -95,6 +93,21 @@ GetOptions(
 
 usage(0) if $help;
 if ($version) { print "xymond_systemd $VERSION\n"; exit 0; }
+
+# Rule file resolution: --config wins, then SYSTEMDMON_CFG, then the
+# first existing of $XYMONHOME/etc/systemdmon.cfg and
+# /etc/xymon/systemdmon.cfg (packaged installations keep the config
+# in /etc/xymon even when $XYMONHOME/etc is elsewhere).
+unless (defined $cfgfile) {
+    $cfgfile = $ENV{SYSTEMDMON_CFG};
+}
+unless (defined $cfgfile) {
+    my @candidates;
+    push @candidates, "$ENV{XYMONHOME}/etc/systemdmon.cfg" if defined $ENV{XYMONHOME};
+    push @candidates, '/etc/xymon/systemdmon.cfg';
+    ($cfgfile) = grep { -e $_ } @candidates;
+    $cfgfile = $candidates[0] unless defined $cfgfile;
+}
 if ($lifetime !~ /^\d+[hdw]?$/) {
     logmsg("invalid --lifetime '$lifetime', falling back to 10");
     $lifetime = '10';

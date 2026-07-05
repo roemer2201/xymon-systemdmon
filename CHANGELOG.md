@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Packaging: `packaging/build-packages.sh` builds
+  `xymon-systemdmon-client` and `xymon-systemdmon-server` as .deb
+  (dpkg-deb) and .rpm (rpmbuild, `packaging/xymon-systemdmon.spec`).
+  Rule file and tasks snippet are marked as config files; Xymon
+  installation paths are overridable at build time.
+- Worker: the default rule file lookup now falls back to
+  `/etc/xymon/systemdmon.cfg` when `$XYMONHOME/etc/systemdmon.cfg`
+  does not exist (packaged installations).
+
 ## [0.1.0] - 2026-07-04
 
 ### Added

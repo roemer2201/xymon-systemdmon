@@ -61,6 +61,38 @@ Debian/Ubuntu Perl is always present (`perl-base` is essential); on
 Rocky/RHEL minimal installs you may need `dnf install perl-interpreter`
 on the server host.
 
+### Packages (.deb / .rpm)
+
+`packaging/build-packages.sh` builds two packages per format into
+`dist/`:
+
+- `xymon-systemdmon-client` - the collector, for every monitored host
+- `xymon-systemdmon-server` - worker + rule file + tasks snippet, for
+  the Xymon server
+
+```
+packaging/build-packages.sh --deb    # needs dpkg-deb
+packaging/build-packages.sh --rpm    # needs rpmbuild
+packaging/build-packages.sh --all    # both (default)
+```
+
+Both rule file and tasks snippet are registered as config files
+(`conffiles` / `%config(noreplace)`), so upgrades never overwrite
+your edited rules. Installation paths default to the Debian xymon
+layout (`/usr/lib/xymon/{client,server}`, `/etc/xymon`); for other
+layouts override at build time, e.g.:
+
+```
+XYMON_HOME=/usr/share/xymon XYMON_CLIENTHOME=/usr/share/xymon-client \
+    packaging/build-packages.sh --rpm
+```
+
+The .deb packages depend on the Debian `xymon-client`/`xymon`
+packages; the .rpm packages deliberately do not declare a dependency
+on Xymon itself (RPM-based installs often use source builds or
+third-party packages with varying names - the Terabithia layout is
+not yet verified, see TODO.md).
+
 The repository layout mirrors the Xymon installation paths, so
 installation means copying two files. The included `install.sh`
 automates this (`--dry-run` shows what would happen; paths can be
@@ -202,6 +234,7 @@ server/libexec/xymond_systemd  channel worker -> $XYMONHOME/libexec/
 server/etc/systemdmon.cfg      rule file example -> $XYMONHOME/etc/
 server/etc/tasks-snippet.cfg   [systemdmon] block for tasks.cfg/tasks.d
 tests/                         offline tests + manual test guide
+packaging/                     .deb/.rpm build (build-packages.sh, spec)
 install.sh                     installer (client/server detection)
 ```
 

@@ -80,6 +80,9 @@ tests/
   fixtures/              sample client-channel streams for offline tests
   run-tests.sh           offline test driver (uses xymond_systemd --test)
   MANUAL-TESTING.md      checklist for tests on real systems
+packaging/
+  build-packages.sh      builds client+server packages as .deb and .rpm
+  xymon-systemdmon.spec  RPM spec (noarch, overridable Xymon paths)
 install.sh               installer (client/server detection, dry-run)
 README.md
 LICENSE                  GPL-2.0 (matches the Xymon ecosystem)
