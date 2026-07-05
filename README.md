@@ -63,12 +63,11 @@ on the server host.
 
 ### Packages (.deb / .rpm)
 
-`packaging/build-packages.sh` builds two packages per format into
-`dist/`:
-
-- `xymon-systemdmon-client` - the collector, for every monitored host
-- `xymon-systemdmon-server` - worker + rule file + tasks snippet, for
-  the Xymon server
+`packaging/build-packages.sh` builds a single `xymon-systemdmon`
+package per format into `dist/`, containing both the client collector
+and the server worker (modeled on the Debian `hobbit-plugins`
+package: unused server files on a client host are harmless, and one
+package keeps deployment simple):
 
 ```
 packaging/build-packages.sh --deb    # needs dpkg-deb
@@ -76,7 +75,7 @@ packaging/build-packages.sh --rpm    # needs rpmbuild
 packaging/build-packages.sh --all    # both (default)
 ```
 
-Both rule file and tasks snippet are registered as config files
+Rule file and tasks snippet are registered as config files
 (`conffiles` / `%config(noreplace)`), so upgrades never overwrite
 your edited rules. Installation paths default to the Debian xymon
 layout (`/usr/lib/xymon/{client,server}`, `/etc/xymon`); for other
@@ -87,11 +86,14 @@ XYMON_HOME=/usr/share/xymon XYMON_CLIENTHOME=/usr/share/xymon-client \
     packaging/build-packages.sh --rpm
 ```
 
-The .deb packages depend on the Debian `xymon-client`/`xymon`
-packages; the .rpm packages deliberately do not declare a dependency
-on Xymon itself (RPM-based installs often use source builds or
-third-party packages with varying names - the Terabithia layout is
-not yet verified, see TODO.md).
+The .deb depends on `bash`, `perl-base` (essential anyway; it
+contains all Perl modules the worker needs) and `xymon-client`. The
+.rpm requires only `bash` and deliberately declares no dependency on
+Xymon or Perl: RPM-based Xymon installs often use source builds or
+third-party packages with varying names (the Terabithia layout is
+not yet verified, see TODO.md), and monitored clients should not be
+forced to install Perl for the unused worker file - the Xymon server
+host needs Perl 5 (core modules only), see Requirements above.
 
 The repository layout mirrors the Xymon installation paths, so
 installation means copying two files. The included `install.sh`

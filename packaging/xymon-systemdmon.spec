@@ -1,4 +1,6 @@
-# RPM spec for xymon-systemdmon (client and server subpackages).
+# RPM spec for xymon-systemdmon (single package, client + server files,
+# modeled on the Debian "hobbit-plugins" approach: unused server files
+# on a client host are harmless).
 #
 # Built from the repository working tree, no source tarball needed:
 #
@@ -34,36 +36,29 @@ Summary:        systemd unit monitoring for the Xymon monitoring system
 License:        GPL-2.0-only
 URL:            https://github.com/roemer2201/xymon-systemdmon
 BuildArch:      noarch
+Requires:       bash
+# Disable automatic perl(...) requires: they stem from the server
+# worker only, and would force a perl install onto every monitored
+# client host. The Xymon SERVER host needs Perl 5 (core modules
+# only) for xymond_systemd - documented in the README.
+AutoReq:        no
 
 %description
-systemd unit monitoring for Xymon: a client-side collector reporting
-all systemd units as a [local:systemd] client message section, and a
-server-side channel worker evaluating central rules into a "systemd"
-status column. Install xymon-systemdmon-client on monitored hosts and
-xymon-systemdmon-server on the Xymon server.
+systemd unit monitoring for Xymon in a single package (like the
+Debian hobbit-plugins package, client and server files ship
+together; unused files are harmless):
 
-%package client
-Summary:        systemd unit collector for Xymon clients
-Requires:       bash
-
-%description client
-Client-side collector for xymon-systemdmon. Installed into the Xymon
-client's local/ extension directory (%{xymon_clienthome}/local); the
-Xymon client picks it up automatically and appends a [local:systemd]
-section to its client messages. All filtering and alerting rules live
-on the Xymon server (xymon-systemdmon-server).
-
-%package server
-Summary:        systemd monitoring channel worker for the Xymon server
-Requires:       perl
-
-%description server
-Server-side channel worker for xymon-systemdmon. Attaches to the
-xymond client channel via xymond_channel, evaluates the rule file
-/etc/xymon/systemdmon.cfg and sends status messages for the "systemd"
-column. Register the worker with xymonlaunch using the snippet in
-/etc/xymon/tasks.d/systemdmon.cfg (append it to tasks.cfg manually if
-your installation does not include a tasks.d directory).
+- client collector (%{xymon_clienthome}/local/systemd): reports all
+  systemd units as a [local:systemd] client message section; the
+  Xymon client picks it up automatically once installed.
+- server channel worker (%{xymon_home}/libexec/xymond_systemd):
+  attaches to the xymond client channel via xymond_channel,
+  evaluates the rule file /etc/xymon/systemdmon.cfg and sends status
+  messages for the "systemd" column. Register the worker with
+  xymonlaunch using the snippet in /etc/xymon/tasks.d/systemdmon.cfg
+  (append it to tasks.cfg manually if your installation does not
+  include a tasks.d directory). The worker needs Perl 5 (core
+  modules only), which is only relevant on the Xymon server host.
 
 %install
 install -D -m 755 %{srcdir}/client/local/systemd \
@@ -75,25 +70,19 @@ install -D -m 644 %{srcdir}/server/etc/systemdmon.cfg \
 install -D -m 644 %{srcdir}/server/etc/tasks-snippet.cfg \
     %{buildroot}%{_sysconfdir}/xymon/tasks.d/systemdmon.cfg
 install -D -m 644 %{srcdir}/LICENSE \
-    %{buildroot}%{_docdir}/%{name}-client/LICENSE
+    %{buildroot}%{_docdir}/%{name}/LICENSE
 install -D -m 644 %{srcdir}/README.md \
-    %{buildroot}%{_docdir}/%{name}-client/README.md
-install -D -m 644 %{srcdir}/LICENSE \
-    %{buildroot}%{_docdir}/%{name}-server/LICENSE
-install -D -m 644 %{srcdir}/README.md \
-    %{buildroot}%{_docdir}/%{name}-server/README.md
+    %{buildroot}%{_docdir}/%{name}/README.md
 
-%files client
+%files
 %{xymon_clienthome}/local/systemd
-%{_docdir}/%{name}-client/
-
-%files server
 %{xymon_home}/libexec/xymond_systemd
 %config(noreplace) %{_sysconfdir}/xymon/systemdmon.cfg
 %dir %{_sysconfdir}/xymon/tasks.d
 %config(noreplace) %{_sysconfdir}/xymon/tasks.d/systemdmon.cfg
-%{_docdir}/%{name}-server/
+%{_docdir}/%{name}/
 
 %changelog
 * Sat Jul 04 2026 roemer2201 <r.oliver@web.de> - 0.1.0-1
-- Initial packaging (client collector, server channel worker)
+- Initial packaging (single package: client collector and server
+  channel worker)

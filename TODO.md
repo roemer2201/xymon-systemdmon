@@ -62,10 +62,11 @@
 - [x] install.sh: detect client vs server installation, place files,
       ENV variable overrides for target paths, --help, dry-run mode
 - [x] Document alerts.cfg examples for the systemd column (README)
-- [x] Packaging: build xymon-systemdmon-client and
-      xymon-systemdmon-server as .deb and .rpm
-      (packaging/build-packages.sh, packaging/xymon-systemdmon.spec;
-      config files marked conffiles / %config(noreplace))
+- [x] Packaging: build a single xymon-systemdmon package (client and
+      server files together, hobbit-plugins style; user decision
+      2026-07) as .deb and .rpm (packaging/build-packages.sh,
+      packaging/xymon-systemdmon.spec; config files marked
+      conffiles / %config(noreplace))
 - [ ] Verify whether Rocky/Terabithia RPM packaging includes a
       tasks.d/ directory from tasks.cfg (Debian/Ubuntu does); update
       README and tasks-snippet.cfg comments with the result, and set

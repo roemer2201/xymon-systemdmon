@@ -7,14 +7,17 @@
 # Project:      xymon-systemdmon
 #
 # Description:
-#   Builds the binary packages
-#     xymon-systemdmon-client  (collector, for monitored hosts)
-#     xymon-systemdmon-server  (channel worker + config, Xymon server)
+#   Builds the binary package
+#     xymon-systemdmon  (client collector AND server worker + config)
 #   as .deb (via dpkg-deb) and/or .rpm (via rpmbuild, using
 #   packaging/xymon-systemdmon.spec). Output goes to dist/.
 #
-#   Both package families are noarch/all. Installation paths follow
-#   the Debian xymon packaging layout by default
+#   Client and server files ship in ONE package, modeled on the
+#   Debian "hobbit-plugins" package: unused server files on a client
+#   host are harmless, and one package keeps deployment simple.
+#
+#   The package is noarch/all. Installation paths follow the Debian
+#   xymon packaging layout by default
 #   (/usr/lib/xymon/{client,server}, /etc/xymon); override via the
 #   environment variables below for other layouts (the Terabithia
 #   RPM layout is not yet verified, see TODO.md).
@@ -58,8 +61,8 @@ usage() {
     cat <<EOF
 Usage: build-packages.sh [--deb] [--rpm] [--all] [--help] [--version]
 
-Builds xymon-systemdmon-client and xymon-systemdmon-server packages
-into dist/.
+Builds the xymon-systemdmon package (client collector and server
+worker in one package) into dist/.
 
   --deb       build .deb packages (needs dpkg-deb)
   --rpm       build .rpm packages (needs rpmbuild)
@@ -127,41 +130,11 @@ EOF
 
 build_deb() {
     command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb not found"
-    local root pkg
+    local pkg="xymon-systemdmon"
+    local root="$WORKDIR/deb"
 
-    # ---- client package
-    pkg="xymon-systemdmon-client"
-    root="$WORKDIR/deb-client"
     install -D -m 755 "$SRCDIR/client/local/systemd" \
         "$root$XYMON_CLIENTHOME/local/systemd"
-    install -d -m 755 "$root/usr/share/doc/$pkg"
-    write_copyright "$root/usr/share/doc/$pkg/copyright"
-    install -m 644 "$SRCDIR/README.md" "$root/usr/share/doc/$pkg/README.md"
-    install -d -m 755 "$root/DEBIAN"
-    cat > "$root/DEBIAN/control" <<EOF
-Package: $pkg
-Version: $PKG_VERSION-$PKG_RELEASE
-Section: net
-Priority: optional
-Architecture: all
-Depends: bash, xymon-client
-Maintainer: $PKG_MAINTAINER
-Homepage: https://github.com/roemer2201/xymon-systemdmon
-Description: systemd unit monitoring for Xymon - client collector
- Collector script for the Xymon client's local/ extension directory.
- Reports all systemd units (service, timer, socket, mount, automount,
- swap, path), the failed-unit list and the overall system state as a
- [local:systemd] client message section. All filtering and alerting
- rules live on the Xymon server (xymon-systemdmon-server).
-EOF
-    dpkg-deb --build --root-owner-group "$root" \
-        "$DISTDIR/${pkg}_${PKG_VERSION}-${PKG_RELEASE}_all.deb" >/dev/null \
-        || die "dpkg-deb failed for $pkg"
-    log "built: dist/${pkg}_${PKG_VERSION}-${PKG_RELEASE}_all.deb"
-
-    # ---- server package
-    pkg="xymon-systemdmon-server"
-    root="$WORKDIR/deb-server"
     install -D -m 755 "$SRCDIR/server/libexec/xymond_systemd" \
         "$root$XYMON_HOME/libexec/xymond_systemd"
     install -D -m 644 "$SRCDIR/server/etc/systemdmon.cfg" \
@@ -172,22 +145,33 @@ EOF
     write_copyright "$root/usr/share/doc/$pkg/copyright"
     install -m 644 "$SRCDIR/README.md" "$root/usr/share/doc/$pkg/README.md"
     install -d -m 755 "$root/DEBIAN"
+    # Depends note: perl-base is Essential on Debian and contains all
+    # modules the server worker uses (Getopt::Long, POSIX,
+    # File::Basename), so listing it costs clients nothing. Depend on
+    # xymon-client (like hobbit-plugins does), not on the xymon
+    # server package: the collector is useful on every host, the
+    # worker files are simply inert where no server runs.
     cat > "$root/DEBIAN/control" <<EOF
 Package: $pkg
 Version: $PKG_VERSION-$PKG_RELEASE
 Section: net
 Priority: optional
 Architecture: all
-Depends: perl, xymon
+Depends: bash, perl-base, xymon-client
 Maintainer: $PKG_MAINTAINER
 Homepage: https://github.com/roemer2201/xymon-systemdmon
-Description: systemd unit monitoring for Xymon - server channel worker
- Channel worker for the xymond client channel. Evaluates the central
- rule file /etc/xymon/systemdmon.cfg against the [local:systemd]
- sections reported by xymon-systemdmon-client and generates the
- "systemd" status column. The xymonlaunch task snippet is installed
- as /etc/xymon/tasks.d/systemdmon.cfg (included automatically by the
- Debian xymon package's tasks.cfg).
+Description: systemd unit monitoring for Xymon
+ Client collector and server channel worker in one package (like
+ hobbit-plugins; unused server files on client hosts are harmless).
+ .
+ The collector reports all systemd units (service, timer, socket,
+ mount, automount, swap, path), the failed-unit list and the overall
+ system state as a [local:systemd] client message section. On the
+ Xymon server the xymond_systemd channel worker evaluates the
+ central rule file /etc/xymon/systemdmon.cfg against these sections
+ and generates the "systemd" status column. The xymonlaunch task
+ snippet is installed as /etc/xymon/tasks.d/systemdmon.cfg (included
+ automatically by the Debian xymon package's tasks.cfg).
 EOF
     cat > "$root/DEBIAN/conffiles" <<EOF
 /etc/xymon/systemdmon.cfg
