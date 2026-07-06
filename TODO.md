@@ -67,11 +67,24 @@
       2026-07) as .deb and .rpm (packaging/build-packages.sh,
       packaging/xymon-systemdmon.spec; config files marked
       conffiles / %config(noreplace))
-- [ ] Verify whether Rocky/Terabithia RPM packaging includes a
-      tasks.d/ directory from tasks.cfg (Debian/Ubuntu does); update
-      README and tasks-snippet.cfg comments with the result, and set
-      the RPM default paths (xymon_home/xymon_clienthome in the spec)
-      to the verified Terabithia layout
+- [x] FreeBSD packaging (user runs a FreeBSD-based Xymon server):
+      build-packages.sh --freebsd stages for the net-mgmt/xymon-server
+      port layout (XYMONHOME=/usr/local/www/xymon/server, verified);
+      packaging/freebsd/make-package.sh builds the .pkg on the
+      FreeBSD host via pkg create, @sample-style config protection.
+      Collector/worker shebangs switched to /usr/bin/env for
+      portability
+- [x] Stock 4.3.30 tasks.cfg verified to contain
+      "directory $XYMONHOME/etc/tasks.d" (tasks.cfg.DIST line 252) -
+      the tasks.d drop-in works on every installation using the
+      shipped default tasks.cfg
+- [ ] Verify the Rocky/Terabithia RPM layout on a real system
+      (XYMONHOME, whether their tasks.cfg kept the stock tasks.d
+      line); then set the RPM default paths (xymon_home/
+      xymon_clienthome in the spec) to the verified layout
+- [ ] Verify the FreeBSD .pkg on the real FreeBSD Xymon server
+      (make-package.sh run, pkg add, worker startup) - see
+      tests/MANUAL-TESTING.md section 6
 - [ ] Optional: RRD tracking of unit counts (TRACK-like), graphs.cfg
       example (deliberately deferred, not part of 0.1.0)
 

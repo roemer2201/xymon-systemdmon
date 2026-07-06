@@ -81,8 +81,12 @@ tests/
   run-tests.sh           offline test driver (uses xymond_systemd --test)
   MANUAL-TESTING.md      checklist for tests on real systems
 packaging/
-  build-packages.sh      builds client+server packages as .deb and .rpm
+  build-packages.sh      builds the package as .deb, .rpm and FreeBSD
+                         staging tarball (one package, hobbit-plugins
+                         style, user decision 2026-07)
   xymon-systemdmon.spec  RPM spec (noarch, overridable Xymon paths)
+  freebsd/
+    make-package.sh      runs pkg create ON the FreeBSD host
 install.sh               installer (client/server detection, dry-run)
 README.md
 LICENSE                  GPL-2.0 (matches the Xymon ecosystem)
@@ -137,3 +141,12 @@ unverified (see TODO).
   see xymond_sample.c.
 - In `status` messages the hostname is sent with dots replaced by
   commas (`status+LIFETIME host,domain,com.systemd COLOR ...`).
+- The stock 4.3.30 tasks.cfg.DIST contains
+  `directory @XYMONHOME@/etc/tasks.d` - every packaging that ships
+  the default tasks.cfg includes tasks.d automatically.
+- FreeBSD port net-mgmt/xymon-server (verified in its pkg-plist and
+  Makefile): XYMONHOME is `${PREFIX}/www/xymon/server` (i.e.
+  /usr/local/www/xymon/server), daemons live in server/bin, configs
+  in server/etc (@sample convention), server/etc/tasks.d is shipped.
+  FreeBSD has no bash/perl in the base system (hence env shebangs in
+  our scripts; the worker needs the perl5 package on FreeBSD).

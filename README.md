@@ -95,6 +95,36 @@ not yet verified, see TODO.md), and monitored clients should not be
 forced to install Perl for the unused worker file - the Xymon server
 host needs Perl 5 (core modules only), see Requirements above.
 
+### FreeBSD (.pkg)
+
+For a FreeBSD-based Xymon server (port `net-mgmt/xymon-server`,
+XYMONHOME `/usr/local/www/xymon/server`). Only the server side is
+useful there - FreeBSD has no systemd - so the .pkg installs the
+worker plus configs into the port's layout and ships the Linux
+client collector under `/usr/local/share/examples/xymon-systemdmon/`
+for distribution to the monitored hosts.
+
+`pkg create` only exists on FreeBSD, so the build happens in two
+steps:
+
+```
+# on the Linux build host:
+packaging/build-packages.sh --freebsd
+# copy dist/xymon-systemdmon-<version>-freebsd-staging.tar.gz to the
+# FreeBSD host, then there:
+tar xzf xymon-systemdmon-<version>-freebsd-staging.tar.gz
+cd freebsd && ./make-package.sh
+pkg add ./xymon-systemdmon-<version>.pkg
+pkg install perl5        # worker dependency, if not present
+```
+
+Config files follow the FreeBSD @sample convention: the package
+installs `systemdmon.cfg.sample` (and the tasks.d snippet as
+`.sample`), copies them to their real names on first install and
+never touches an edited file on upgrade or removal. The port's stock
+tasks.cfg already includes the `tasks.d` directory, so the worker
+starts automatically once xymonlaunch reloads.
+
 The repository layout mirrors the Xymon installation paths, so
 installation means copying two files. The included `install.sh`
 automates this (`--dry-run` shows what would happen; paths can be
@@ -136,8 +166,10 @@ Register the worker with xymonlaunch:
 - **Debian/Ubuntu packages** include `/etc/xymon/tasks.d/` from
   tasks.cfg - drop `server/etc/tasks-snippet.cfg` there as
   `systemdmon.cfg`.
-- **Other installations** (including Rocky/Terabithia RPMs - whether
-  they ship a tasks.d include is not yet verified): append the
+- **Other installations**: the stock Xymon 4.3.30 tasks.cfg already
+  contains `directory $XYMONHOME/etc/tasks.d`, so if your tasks.cfg
+  is based on the shipped default, dropping the snippet into
+  `$XYMONHOME/etc/tasks.d/` works there too. Otherwise append the
   `[systemdmon]` block from `server/etc/tasks-snippet.cfg` to
   `$XYMONHOME/etc/tasks.cfg`.
 

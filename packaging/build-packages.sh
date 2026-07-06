@@ -22,6 +22,13 @@
 #   environment variables below for other layouts (the Terabithia
 #   RPM layout is not yet verified, see TODO.md).
 #
+#   --freebsd does not build a final package (pkg create only exists
+#   on FreeBSD); it produces a staging tarball in dist/ containing
+#   the file tree for the FreeBSD xymon-server port layout
+#   (XYMONHOME=$PREFIX/www/xymon/server, verified against the
+#   net-mgmt/xymon-server port) plus packaging/freebsd/
+#   make-package.sh, which is then run ON the FreeBSD host.
+#
 # Program flow:
 #   1. Parse options (--deb, --rpm, --all, --help, --version).
 #   2. Stage the file trees in a temporary directory.
@@ -33,11 +40,14 @@
 #   PKG_RELEASE        package release        (default: 1)
 #   XYMON_HOME         server home in packages (default: /usr/lib/xymon/server)
 #   XYMON_CLIENTHOME   client home in packages (default: /usr/lib/xymon/client)
+#   FBSD_PREFIX        FreeBSD prefix          (default: /usr/local)
+#   FBSD_XYMON_WWWDIR  FreeBSD xymon www dir   (default: $FBSD_PREFIX/www/xymon)
 #   PKG_MAINTAINER     maintainer string
 #                      (default: "roemer2201 <r.oliver@web.de>")
 #   SYSTEMDMON_VERBOSE 1 = also log via logger (default: 0)
 #
-# Requirements: dpkg-deb for --deb, rpmbuild for --rpm.
+# Requirements: dpkg-deb for --deb, rpmbuild for --rpm, tar for
+# --freebsd (the final pkg create step runs on the FreeBSD host).
 #===============================================================================
 
 set -u
@@ -48,6 +58,8 @@ PKG_VERSION="${PKG_VERSION:-0.1.0}"
 PKG_RELEASE="${PKG_RELEASE:-1}"
 XYMON_HOME="${XYMON_HOME:-/usr/lib/xymon/server}"
 XYMON_CLIENTHOME="${XYMON_CLIENTHOME:-/usr/lib/xymon/client}"
+FBSD_PREFIX="${FBSD_PREFIX:-/usr/local}"
+FBSD_XYMON_WWWDIR="${FBSD_XYMON_WWWDIR:-$FBSD_PREFIX/www/xymon}"
 PKG_MAINTAINER="${PKG_MAINTAINER:-roemer2201 <r.oliver@web.de>}"
 SYSTEMDMON_VERBOSE="${SYSTEMDMON_VERBOSE:-0}"
 
@@ -56,22 +68,26 @@ DISTDIR="$SRCDIR/dist"
 
 DO_DEB=0
 DO_RPM=0
+DO_FBSD=0
 
 usage() {
     cat <<EOF
-Usage: build-packages.sh [--deb] [--rpm] [--all] [--help] [--version]
+Usage: build-packages.sh [--deb] [--rpm] [--freebsd] [--all] [--help]
+                         [--version]
 
 Builds the xymon-systemdmon package (client collector and server
 worker in one package) into dist/.
 
-  --deb       build .deb packages (needs dpkg-deb)
-  --rpm       build .rpm packages (needs rpmbuild)
-  --all       both (default if no option is given)
+  --deb       build .deb package (needs dpkg-deb)
+  --rpm       build .rpm package (needs rpmbuild)
+  --freebsd   build FreeBSD staging tarball; run the included
+              make-package.sh on the FreeBSD host to get the .pkg
+  --all       all of the above (default if no option is given)
   --help      this text
   --version   print version
 
 Environment overrides: PKG_VERSION, PKG_RELEASE, XYMON_HOME,
-XYMON_CLIENTHOME, PKG_MAINTAINER
+XYMON_CLIENTHOME, FBSD_PREFIX, FBSD_XYMON_WWWDIR, PKG_MAINTAINER
 EOF
 }
 
@@ -91,16 +107,18 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --deb)     DO_DEB=1 ;;
         --rpm)     DO_RPM=1 ;;
-        --all)     DO_DEB=1; DO_RPM=1 ;;
+        --freebsd) DO_FBSD=1 ;;
+        --all)     DO_DEB=1; DO_RPM=1; DO_FBSD=1 ;;
         --help|-h) usage; exit 0 ;;
         --version) echo "build-packages.sh (xymon-systemdmon) $VERSION"; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
     shift
 done
-if [ "$DO_DEB" = "0" ] && [ "$DO_RPM" = "0" ]; then
+if [ "$DO_DEB" = "0" ] && [ "$DO_RPM" = "0" ] && [ "$DO_FBSD" = "0" ]; then
     DO_DEB=1
     DO_RPM=1
+    DO_FBSD=1
 fi
 
 WORKDIR="$(mktemp -d)" || die "mktemp failed"
@@ -205,10 +223,50 @@ build_rpm() {
     done
 }
 
+#--- freebsd --------------------------------------------------------------------
+
+build_freebsd() {
+    # Stages the file tree for the FreeBSD net-mgmt/xymon-server port
+    # layout (XYMONHOME=$FBSD_XYMON_WWWDIR/server, verified against
+    # the port's pkg-plist) and tars it together with
+    # packaging/freebsd/make-package.sh. The final pkg create step
+    # runs on the FreeBSD host, where pkg(8) exists.
+    local root="$WORKDIR/freebsd"
+    local stage="$root/stage"
+    local xhome="$FBSD_XYMON_WWWDIR/server"
+
+    install -D -m 755 "$SRCDIR/server/libexec/xymond_systemd" \
+        "$stage$xhome/libexec/xymond_systemd"
+    # configs ship as .sample; make-package.sh installs pkg scripts
+    # that copy them to their real names (ports @sample behavior)
+    install -D -m 644 "$SRCDIR/server/etc/systemdmon.cfg" \
+        "$stage$xhome/etc/systemdmon.cfg.sample"
+    install -D -m 644 "$SRCDIR/server/etc/tasks-snippet.cfg" \
+        "$stage$xhome/etc/tasks.d/systemdmon.cfg.sample"
+    # the collector is useless on FreeBSD itself (no systemd) - ship
+    # it as an example for distribution to the monitored Linux hosts,
+    # avoiding path conflicts with a possible xymon-client port
+    install -D -m 755 "$SRCDIR/client/local/systemd" \
+        "$stage$FBSD_PREFIX/share/examples/xymon-systemdmon/systemd"
+    install -D -m 644 "$SRCDIR/README.md" \
+        "$stage$FBSD_PREFIX/share/doc/xymon-systemdmon/README.md"
+    install -D -m 644 "$SRCDIR/LICENSE" \
+        "$stage$FBSD_PREFIX/share/doc/xymon-systemdmon/LICENSE"
+
+    install -m 755 "$SRCDIR/packaging/freebsd/make-package.sh" "$root/make-package.sh"
+    printf '%s\n' "$PKG_VERSION" > "$root/VERSION"
+
+    tar -czf "$DISTDIR/xymon-systemdmon-${PKG_VERSION}-freebsd-staging.tar.gz" \
+        -C "$WORKDIR" freebsd || die "tar failed for freebsd staging"
+    log "built: dist/xymon-systemdmon-${PKG_VERSION}-freebsd-staging.tar.gz"
+    log "  -> on the FreeBSD host: tar xzf ..., cd freebsd, ./make-package.sh"
+}
+
 #--- main -----------------------------------------------------------------------
 
 [ "$DO_DEB" = "1" ] && build_deb
 [ "$DO_RPM" = "1" ] && build_rpm
+[ "$DO_FBSD" = "1" ] && build_freebsd
 
 log ""
 log "package contents:"

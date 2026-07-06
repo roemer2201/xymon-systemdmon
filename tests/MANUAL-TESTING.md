@@ -67,9 +67,40 @@ Install worker + config + tasks snippet, then:
 
 ## 5. Packaging paths (documentation follow-up)
 
-- [ ] Verify whether the Rocky/Terabithia RPMs include a tasks.d/
-      directory from tasks.cfg (check `grep -ri 'directory\|include'
-      /etc/xymon/tasks.cfg` on a Terabithia install) and update
-      README + tasks-snippet.cfg comments accordingly.
+- [ ] Verify the Rocky/Terabithia RPM layout: XYMONHOME, and whether
+      their tasks.cfg kept the stock
+      `directory $XYMONHOME/etc/tasks.d` line (check
+      `grep -ri 'directory\|include' .../tasks.cfg`); update the RPM
+      spec defaults accordingly.
 - [ ] Confirm XYMONCLIENTHOME/XYMONHOME auto-detection paths in
       install.sh on both platforms; extend the probe lists if needed.
+
+## 6. FreeBSD Xymon server
+
+Build the staging tarball on Linux
+(`packaging/build-packages.sh --freebsd`), copy it over, then on the
+FreeBSD host:
+
+```
+tar xzf xymon-systemdmon-<version>-freebsd-staging.tar.gz
+cd freebsd && ./make-package.sh
+pkg add ./xymon-systemdmon-<version>.pkg
+```
+
+- [ ] make-package.sh runs clean (pkg create succeeds, correct
+      noarch ABI like FreeBSD:14:*).
+- [ ] `pkg info -l xymon-systemdmon` lists worker, samples, examples.
+- [ ] post-install copied both .sample files to their real names;
+      an existing edited systemdmon.cfg survives `pkg upgrade`/
+      reinstall untouched.
+- [ ] `pkg install perl5` present; `perl -c
+      /usr/local/www/xymon/server/libexec/xymond_systemd` passes.
+- [ ] xymonlaunch starts the [systemdmon] task (port tasks.cfg
+      includes tasks.d; check systemdmon.log).
+- [ ] Offline tests pass on FreeBSD too:
+      `SYSTEMDMON_WORKER=... tests/run-tests.sh` (script needs bash:
+      `pkg install bash`).
+- [ ] Linux clients report and the systemd column appears; ghost
+      case still holds.
+- [ ] `pkg delete xymon-systemdmon` keeps an edited systemdmon.cfg
+      but removes an unmodified one (pre-deinstall cmp logic).

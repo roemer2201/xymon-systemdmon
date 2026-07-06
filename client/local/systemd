@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #===============================================================================
 # systemd - Xymon client collector for systemd unit states
 #

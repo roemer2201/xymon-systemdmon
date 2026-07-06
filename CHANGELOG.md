@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Worker: the default rule file lookup now falls back to
   `/etc/xymon/systemdmon.cfg` when `$XYMONHOME/etc/systemdmon.cfg`
   does not exist (packaged installations).
+- FreeBSD packaging for a FreeBSD-based Xymon server:
+  `build-packages.sh --freebsd` produces a staging tarball;
+  `packaging/freebsd/make-package.sh` (run on the FreeBSD host)
+  builds the .pkg with pkg create, targeting the
+  net-mgmt/xymon-server port layout
+  (XYMONHOME=/usr/local/www/xymon/server, verified against the
+  port). Configs follow the @sample convention; the Linux collector
+  ships under share/examples for distribution to monitored hosts.
+
+### Changed
+
+- Collector and worker shebangs switched to `/usr/bin/env bash` /
+  `/usr/bin/env perl` for FreeBSD portability (bash and perl live
+  under /usr/local/bin there).
 
 ## [0.1.0] - 2026-07-04
 
